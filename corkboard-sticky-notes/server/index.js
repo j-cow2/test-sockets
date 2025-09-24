@@ -7,10 +7,20 @@ const http = require('http');
 const server = http.createServer(app);
 const { Server } = require('socket.io');
 const io = new Server(server);
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const PORT = Number(process.env.PORT) || 3000;
+server.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
+
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Exiting.`);
+    process.exit(1);
+  }
+  console.error('Server error:', err);
+  process.exit(1);
+});
+
 const STATE_FILE = path.join(__dirname, 'state.json');
 
 app.use(express.json({ limit: '5mb' }));
@@ -159,8 +169,4 @@ io.on('connection', socket => {
 // Fallback to index.html for SPA
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
-});
-
-server.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
 });

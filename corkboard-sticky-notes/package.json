@@ -2,9 +2,10 @@
   "name": "corkboard-sticky-notes",
   "version": "1.0.0",
   "description": "A canvas application that simulates a sticky note and corkboard with local storage support.",
-  "main": "src/index.js",
+  "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
   },
   "keywords": [
     "sticky notes",

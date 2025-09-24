@@ -748,7 +748,14 @@
         });
         if (res.ok) {
           const created = await res.json();
-          notes.push(created);
+          // Avoid duplicate if the socket already delivered this note
+          const existsIdx = notes.findIndex(n => String(n.id) === String(created.id));
+          if (existsIdx === -1) {
+            notes.push(created);
+          } else {
+            // Merge server-side fields into existing note (keeps any local state)
+            notes[existsIdx] = Object.assign({}, notes[existsIdx], created);
+          }
           requestDraw();
           return;
         }

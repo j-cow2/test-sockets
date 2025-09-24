@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Corkboard Sticky Notes</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      height: 100%;
+      width: 100%;
+      background: #bfa;
+    }
+    #toolbar {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 10;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      background: #fff8;
+      border-radius: 10px;
+      padding: 6px 14px 6px 6px;
+      box-shadow: 0 2px 8px #0001;
+      backdrop-filter: blur(4px);
+    }
+    .icon-btn {
+      background: #fff;
+      border: none;
+      border-radius: 8px;
+      width: 38px;
+      height: 38px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 22px;
+      transition: background 0.2s, box-shadow 0.2s;
+      box-shadow: 0 2px 8px #0001;
+      outline: none;
+    }
+    .icon-btn:hover, .icon-btn:focus {
+      background: #ffe4c8;
+      box-shadow: 0 4px 16px #0002;
+    }
+    #scaleSlider {
+      width: 90px;
+      margin-left: 8px;
+      accent-color: #e2b04a;
+    }
+    #scaleLabel {
+      font-size: 14px;
+      color: #444;
+      margin-left: 2px;
+      margin-right: 2px;
+      user-select: none;
+    }
+    #corkboard {
+      display: block;
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      width: 100vw;
+      height: 100vh;
+      cursor: grab;
+    }
+    #noteEditor {
+      position: absolute;
+      z-index: 20;
+      resize: none;
+      font-size: 15px;
+      font-family: inherit;
+      border: 2px solid #e2b04a;
+      /* Removed box-shadow for performance */
+      padding: 10px 10px 10px 10px;
+      background: #fffec8;
+      outline: none;
+      display: none;
+      border-radius: 0;
+      transition: border-color 0.2s;
+    }
+    #noteEditor:not(:focus) {
+      border-color: #fffec8;
+    }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <button id="addNoteBtn" class="icon-btn" title="Add Sticky Note">📝</button>
+    <button id="uploadBtn" class="icon-btn" title="Upload Image">📷</button>
+    </div>
+  <canvas id="corkboard"></canvas>
+  <script>
+    // --- CONFIG ---
+    const BASE_NOTE_WIDTH = 130, BASE_NOTE_HEIGHT = 90;
+    const NOTE_HEADER_HEIGHT = 32;
+    const NOTE_COLORS = ['#fffec8', '#ffe4c8', '#c8ffe4', '#c8e4ff'];
+    // Darker header colors for each note color
+    const NOTE_HEADER_COLORS = ['#e2d97a', '#e2b07a', '#7ae2b0', '#7ab0e2'];
+    const YARN_COLOR = 'red';
+    const YARN_WIDTH = 5; // Thicker yarn
+    const BASE_POLAROID_WIDTH = 110, BASE_POLAROID_HEIGHT = 110;
+    const NOTE_MIN_WIDTH = 60, NOTE_MIN_HEIGHT = 40;
+    const RESIZE_HANDLE_SIZE = 14;
+
+    // --- STATE ---
+    let notes = [];
+    let yarns = [];
+    let polaroids = [];
+  // track notes changed during interaction so we can PUT only those
+  let modifiedNoteIds = new Set();
+    let draggingNote = null, draggingPolaroid = null, dragOffset = {x:0, y:0};
+    let resizingNote = null, resizeStart = null;
+    let panning = false, panStart = {x:0, y:0}, panOffset = {x:0, y:0}, viewOffset = {x:0, y:0};
+    let linking = false, linkStart = null; // {type: 'note'|'polaroid', id}
+    let linkingFrom = null; // {type, id}
+    let linkingFromPos = null; // {x, y}
+    let linkingToPos = null; // {x, y}
+    let editingNote = null;
+    let editingCaretPos = null;
+    let editingInput = "";
+  let noteScale = parseFloat(localStorage.getItem('corkboard_noteScale') || '1');
+
+    // --- Zoom/Pan State ---
+    let zoom = 1;
+    const ZOOM_MIN = 0.3, ZOOM_MAX = 2.5;
+
+    // --- CANVAS SETUP ---
+    const canvas = document.getElementById('corkboard');
+    const ctx = canvas.getContext('2d');
+    let corkboardImg = new Image();
+    corkboardImg.src = 'corkboard.jpg';
+
+    // --- Small pattern for corkboard ---
+    let patternCanvas = null, pattern = null;
+    corkboardImg.onload = () => {
+      patternCanvas = document.createElement('canvas');
+      const scale = 0.4;
+      patternCanvas.width = corkboardImg.width * scale;
+      patternCanvas.height = corkboardImg.height * scale;
+      const pctx = patternCanvas.getContext('2d');
+      pctx.drawImage(corkboardImg, 0, 0, patternCanvas.width, patternCanvas.height);
+      pattern = ctx.createPattern(patternCanvas, 'repeat');
+      load();
+      resizeCanvas();
+      draw();
+    };
+
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      draw();
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    // --- STORAGE (HTTP-backed with localStorage fallback) ---
+    const API_BASE = '/api/state';
+
+    async function save() {
+      const payload = {
+        notes,
+        yarns,
+        polaroids,
+        viewOffset,
+        noteScale,
+        zoom
+      };
+      try {
+        const res = await fetch(API_BASE, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error('server save failed');
+      } catch (err) {
+        // Fallback to localStorage when server not available
+        try {
+          localStorage.setItem('corkboard_notes', JSON.stringify(notes));
+          localStorage.setItem('corkboard_yarns', JSON.stringify(yarns));
+          localStorage.setItem('corkboard_polaroids', JSON.stringify(polaroids));
+          localStorage.setItem('corkboard_view', JSON.stringify(viewOffset));
+          localStorage.setItem('corkboard_noteScale', noteScale);
+          localStorage.setItem('corkboard_zoom', zoom);
+        } catch (e) {
+          console.warn('Failed to save to fallback localStorage', e);
+        }
+      }
+      requestDraw();
+    }
+
+    async function load() {
+      // Try server first
+      try {
+        const res = await fetch(API_BASE);
+        if (res.ok) {
+          const data = await res.json();
+          notes = data.notes || [];
+          yarns = data.yarns || [];
+          polaroids = data.polaroids || [];
+          viewOffset = data.viewOffset || { x: 0, y: 0 };
+          noteScale = parseFloat(data.noteScale || noteScale);
+          zoom = parseFloat(data.zoom || zoom);
+          return;
+        }
+      } catch (err) {
+        // fall through to localStorage fallback
+        console.warn('Server state load failed, falling back to localStorage');
+      }
+
+      // Local storage fallback
+      try {
+        notes = JSON.parse(localStorage.getItem('corkboard_notes') || '[]');
+        yarns = JSON.parse(localStorage.getItem('corkboard_yarns') || '[]');
+        polaroids = JSON.parse(localStorage.getItem('corkboard_polaroids') || '[]');
+        viewOffset = JSON.parse(localStorage.getItem('corkboard_view') || '{"x":0,"y":0}');
+        noteScale = parseFloat(localStorage.getItem('corkboard_noteScale') || noteScale);
+        zoom = parseFloat(localStorage.getItem('corkboard_zoom') || zoom);
+      } catch (e) {
+        console.warn('Failed to parse fallback localStorage state', e);
+      }
+    }
+
+    // --- DRAWING ---
+    function draw() {
+      ctx.setTransform(1,0,0,1,0,0);
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+
+      // --- Apply pan and zoom for everything, including background ---
+      ctx.setTransform(zoom, 0, 0, zoom, viewOffset.x * zoom, viewOffset.y * zoom);
+
+      if (pattern) {
+        ctx.save();
+        ctx.fillStyle = pattern;
+        ctx.fillRect(
+          -viewOffset.x - 500,
+          -viewOffset.y - 500,
+          canvas.width / zoom + 1000,
+          canvas.height / zoom + 1000
+        );
+        ctx.restore();
+      }
+
+      // Draw yarns (now can connect notes and/or polaroids)
+      for (const yarn of yarns) {
+        const a = getAnchor(yarn.fromType, yarn.from);
+        const b = getAnchor(yarn.toType, yarn.to);
+        if (a && b) {
+          ctx.strokeStyle = YARN_COLOR;
+          ctx.lineWidth = YARN_WIDTH;
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+      }
+
+      // Draw yarn in progress
+      if (linkingFrom && linkingFromPos && linkingToPos) {
+        ctx.save();
+        ctx.strokeStyle = YARN_COLOR;
+        ctx.lineWidth = YARN_WIDTH;
+        ctx.setLineDash([8, 8]);
+        ctx.beginPath();
+        ctx.moveTo(linkingFromPos.x, linkingFromPos.y);
+        ctx.lineTo(linkingToPos.x, linkingToPos.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Draw polaroids
+      for (const p of polaroids) {
+        const w = BASE_POLAROID_WIDTH * noteScale, h = BASE_POLAROID_HEIGHT * noteScale;
+        ctx.save();
+        ctx.fillStyle = '#fff';
+        ctx.strokeStyle = '#bbb';
+        ctx.lineWidth = 2;
+        ctx.fillRect(p.x, p.y, w, h);
+        ctx.strokeRect(p.x, p.y, w, h);
+        // Draw image
+        if (p.img) {
+          if (!p._imgObj) {
+            p._imgObj = new window.Image();
+            p._imgObj.src = p.img;
+            p._imgObj.onload = draw;
+          }
+          ctx.drawImage(p._imgObj, p.x+8*noteScale, p.y+8*noteScale, w-16*noteScale, h-32*noteScale);
+        }
+        // Draw link dot (top left)
+        ctx.beginPath();
+        ctx.arc(p.x+14*noteScale, p.y+14*noteScale, 7*noteScale, 0, 2*Math.PI);
+        ctx.fillStyle = linking && linkStart && linkStart.type === 'polaroid' && linkStart.id === p.id ? '#f00' : '#fff';
+        ctx.fill();
+        ctx.strokeStyle = '#d00';
+        ctx.stroke();
+        // Delete X (top right)
+        ctx.beginPath();
+        ctx.arc(p.x+w-14*noteScale, p.y+14*noteScale, 10*noteScale, 0, 2*Math.PI);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+        ctx.strokeStyle = '#d00';
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(p.x+w-20*noteScale, p.y+8*noteScale);
+        ctx.lineTo(p.x+w-8*noteScale, p.y+20*noteScale);
+        ctx.moveTo(p.x+w-8*noteScale, p.y+8*noteScale);
+        ctx.lineTo(p.x+w-20*noteScale, p.y+20*noteScale);
+        ctx.strokeStyle = '#d00';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Draw notes
+      for (const note of notes) {
+        const w = (note.width ?? BASE_NOTE_WIDTH) * noteScale;
+        const h = (note.height ?? BASE_NOTE_HEIGHT) * noteScale;
+        const headerH = NOTE_HEADER_HEIGHT * noteScale;
+        const colorIdx = note.colorIdx % NOTE_COLORS.length;
+
+        // Note body (no shadow, no rounded corners)
+        ctx.save();
+        ctx.fillStyle = NOTE_COLORS[colorIdx];
+        ctx.strokeStyle = "#e2b04a";
+        ctx.lineWidth = 2;
+        ctx.fillRect(note.x, note.y, w, h);
+        ctx.strokeRect(note.x, note.y, w, h);
+
+        // Header (darker color, no rounded corners)
+        ctx.save();
+        ctx.fillStyle = NOTE_HEADER_COLORS[colorIdx];
+        ctx.globalAlpha = 0.97;
+        ctx.fillRect(note.x, note.y, w, headerH);
+        ctx.globalAlpha = 1;
+        ctx.restore();
+
+        // Link dot (left in header)
+        ctx.beginPath();
+        ctx.arc(note.x+18*noteScale, note.y+headerH/2, 8*noteScale, 0, 2*Math.PI);
+        ctx.fillStyle = linking && linkStart && linkStart.type === 'note' && linkStart.id === note.id ? '#f00' : '#fff';
+        ctx.fill();
+        ctx.strokeStyle = '#d00';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Delete X (right in header)
+        ctx.beginPath();
+        ctx.arc(note.x+w-18*noteScale, note.y+headerH/2, 8*noteScale, 0, 2*Math.PI);
+        ctx.fillStyle = '#fff';
+        ctx.fill();
+        ctx.strokeStyle = '#d00';
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(note.x+w-23*noteScale, note.y+headerH/2-5*noteScale);
+        ctx.lineTo(note.x+w-13*noteScale, note.y+headerH/2+5*noteScale);
+        ctx.moveTo(note.x+w-13*noteScale, note.y+headerH/2-5*noteScale);
+        ctx.lineTo(note.x+w-23*noteScale, note.y+headerH/2+5*noteScale);
+        ctx.strokeStyle = '#d00';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Draw resize handle (bottom right)
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(
+          note.x + w - RESIZE_HANDLE_SIZE,
+          note.y + h - RESIZE_HANDLE_SIZE,
+          RESIZE_HANDLE_SIZE,
+          RESIZE_HANDLE_SIZE
+        );
+        ctx.fillStyle = "#bbb";
+        ctx.globalAlpha = 0.7;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = "#888";
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(note.x + w - 4, note.y + h - 10);
+        ctx.lineTo(note.x + w - 10, note.y + h - 4);
+        ctx.strokeStyle = "#888";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+
+        // Draw text (below header)
+        ctx.fillStyle = '#333';
+        ctx.font = `${15*noteScale}px sans-serif`;
+        ctx.textBaseline = 'top';
+
+        if (editingNote === note) {
+          // Draw editing text with caret
+          const lines = [];
+          let line = '';
+          const words = editingInput.split(' ');
+          const maxWidth = w-24*noteScale;
+          for (let n = 0; n < words.length; n++) {
+            const testLine = line + words[n] + ' ';
+            const metrics = ctx.measureText(testLine);
+            if (metrics.width > maxWidth && n > 0) {
+              lines.push(line);
+              line = words[n] + ' ';
+            } else {
+              line = testLine;
+            }
+          }
+          lines.push(line);
+
+          // Find caret position
+          let caretLine = 0, caretCol = 0, chars = 0;
+          for (let i = 0; i < lines.length; i++) {
+            if (chars + lines[i].length >= editingCaretPos) {
+              caretLine = i;
+              caretCol = editingCaretPos - chars;
+              break;
+            }
+            chars += lines[i].length;
+          }
+
+          let y = note.y+headerH+6*noteScale;
+          for (let i = 0; i < lines.length; i++) {
+            ctx.fillText(lines[i], note.x+12*noteScale, y);
+            // Draw caret if this is the caret line
+            if (i === caretLine) {
+              const beforeCaret = lines[i].slice(0, caretCol);
+              const caretX = note.x+12*noteScale + ctx.measureText(beforeCaret).width;
+              ctx.save();
+              ctx.strokeStyle = "#222";
+              ctx.beginPath();
+              ctx.moveTo(caretX, y);
+              ctx.lineTo(caretX, y + 16*noteScale);
+              ctx.lineWidth = 2;
+              ctx.stroke();
+              ctx.restore();
+            }
+            y += 18*noteScale;
+          }
+        } else {
+          wrapText(
+            ctx,
+            note.text,
+            note.x+12*noteScale,
+            note.y+headerH+6*noteScale,
+            w-24*noteScale,
+            18*noteScale
+          );
+        }
+
+        ctx.restore();
+      }
+    }
+
+    function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+      const words = text.split(' ');
+      let line = '';
+      for(let n = 0; n < words.length; n++) {
+        const testLine = line + words[n] + ' ';
+        const metrics = ctx.measureText(testLine);
+        if (metrics.width > maxWidth && n > 0) {
+          ctx.fillText(line, x, y);
+          line = words[n] + ' ';
+          y += lineHeight;
+        } else {
+          line = testLine;
+        }
+      }
+      ctx.fillText(line, x, y);
+    }
+
+    // --- EVENTS ---
+  canvas.addEventListener('mousedown', async e => {
+      hideEditor();
+      const mouse = getMouse(e);
+
+      // --- Note resize handle hit test ---
+      for (let i = notes.length-1; i >= 0; i--) {
+        const note = notes[i];
+        const w = (note.width ?? BASE_NOTE_WIDTH) * noteScale;
+        const h = (note.height ?? BASE_NOTE_HEIGHT) * noteScale;
+        if (
+          mouse.x >= note.x + w - RESIZE_HANDLE_SIZE &&
+          mouse.x <= note.x + w &&
+          mouse.y >= note.y + h - RESIZE_HANDLE_SIZE &&
+          mouse.y <= note.y + h
+        ) {
+          resizingNote = note;
+          resizeStart = {
+            mouseX: mouse.x,
+            mouseY: mouse.y,
+            origW: note.width ?? BASE_NOTE_WIDTH,
+            origH: note.height ?? BASE_NOTE_HEIGHT
+          };
+          return;
+        }
+      }
+
+      // --- Note header hit test (for dragging) ---
+      for (let i = notes.length-1; i >= 0; i--) {
+        const note = notes[i];
+        const w = (note.width ?? BASE_NOTE_WIDTH) * noteScale;
+        const headerH = NOTE_HEADER_HEIGHT * noteScale;
+        // Only header area
+        if (
+          mouse.x >= note.x &&
+          mouse.x <= note.x + w &&
+          mouse.y >= note.y &&
+          mouse.y <= note.y + headerH
+        ) {
+          // Link dot (left in header): start yarn drag
+          if (inCircle(mouse, note.x+18*noteScale, note.y+headerH/2, 10*noteScale)) {
+            linkingFrom = {type: 'note', id: note.id};
+            linkingFromPos = {x: note.x+18*noteScale, y: note.y+headerH/2};
+            linkingToPos = {x: mouse.x, y: mouse.y};
+            canvas.style.cursor = "crosshair";
+            requestDraw();
+            return;
+          }
+          // Delete X (right in header)
+          if (inCircle(mouse, note.x+w-18*noteScale, note.y+headerH/2, 10*noteScale)) {
+            try {
+              const res = await fetch('/api/notes/' + encodeURIComponent(note.id), { method: 'DELETE' });
+              if (res.ok) {
+                notes = notes.filter(n => n.id !== note.id);
+                yarns = yarns.filter(y => !(y.fromType === 'note' && y.from === note.id) && !(y.toType === 'note' && y.to === note.id));
+                requestDraw();
+                return;
+              }
+            } catch (e) {
+              console.warn('Failed to delete note on server, falling back to local delete', e);
+            }
+            notes = notes.filter(n => n.id !== note.id);
+            yarns = yarns.filter(y => !(y.fromType === 'note' && y.from === note.id) && !(y.toType === 'note' && y.to === note.id));
+            save();
+            requestDraw();
+            return;
+          }
+          // Drag note (header only)
+          draggingNote = note;
+          dragOffset.x = mouse.x - note.x;
+          dragOffset.y = mouse.y - note.y;
+          return;
+        }
+      }
+
+      // Polaroid hit test
+      const pol = hitTestPolaroid(mouse.x, mouse.y);
+      if (pol) {
+        const w = BASE_POLAROID_WIDTH * noteScale, h = BASE_POLAROID_HEIGHT * noteScale;
+        // Link dot (top left): start yarn drag
+        if (inCircle(mouse, pol.x+14*noteScale, pol.y+14*noteScale, 10*noteScale)) {
+          linkingFrom = {type: 'polaroid', id: pol.id};
+          linkingFromPos = {x: pol.x+14*noteScale, y: pol.y+14*noteScale};
+          linkingToPos = {x: mouse.x, y: mouse.y};
+          canvas.style.cursor = "crosshair";
+          requestDraw();
+          return;
+        }
+        // Delete X (top right)
+        if (inCircle(mouse, pol.x+w-14*noteScale, pol.y+14*noteScale, 12*noteScale)) {
+          polaroids = polaroids.filter(p => p.id !== pol.id);
+          yarns = yarns.filter(y => !(y.fromType === 'polaroid' && y.from === pol.id) && !(y.toType === 'polaroid' && y.to === pol.id));
+          save();
+          requestDraw();
+          return;
+        }
+        // Drag polaroid (anywhere)
+        draggingPolaroid = pol;
+        dragOffset.x = mouse.x - pol.x;
+        dragOffset.y = mouse.y - pol.y;
+        return;
+      }
+
+      // Start panning
+      panning = true;
+      panStart.x = e.clientX;
+      panStart.y = e.clientY;
+      panOffset.x = viewOffset.x;
+      panOffset.y = viewOffset.y;
+    });
+
+    canvas.addEventListener('mousemove', e => {
+      if (editingNote) return;
+      const mouse = getMouse(e);
+
+      // --- Yarn drag in progress ---
+      if (linkingFrom) {
+        linkingToPos = {x: mouse.x, y: mouse.y};
+        requestDraw();
+        return;
+      }
+
+      // --- Note resizing logic ---
+  if (resizingNote && resizeStart) {
+        let minW = resizingNote.minWidth || NOTE_MIN_WIDTH;
+        let minH = resizingNote.minHeight || NOTE_HEADER_HEIGHT + 20;
+        let newW = (resizeStart.origW * noteScale + (mouse.x - resizeStart.mouseX)) / noteScale;
+        let newH = (resizeStart.origH * noteScale + (mouse.y - resizeStart.mouseY)) / noteScale;
+        newW = Math.max(minW, Math.round(newW));
+        newH = Math.max(minH, Math.round(newH));
+        resizingNote.width = newW;
+        resizingNote.height = newH;
+        modifiedNoteIds.add(resizingNote.id);
+        requestDraw();
+        return;
+      }
+
+      if (draggingNote) {
+        draggingNote.x = mouse.x - dragOffset.x;
+        draggingNote.y = mouse.y - dragOffset.y;
+        modifiedNoteIds.add(draggingNote.id);
+        requestDraw();
+      } else if (draggingPolaroid) {
+        draggingPolaroid.x = mouse.x - dragOffset.x;
+        draggingPolaroid.y = mouse.y - dragOffset.y;
+        // no fine-grained API for polaroids yet; persist full state
+        save();
+        requestDraw();
+      } else if (panning) {
+        // Scale panning speed with zoom
+        viewOffset.x = panOffset.x + (e.clientX - panStart.x) / zoom;
+        viewOffset.y = panOffset.y + (e.clientY - panStart.y) / zoom;
+        save();
+        requestDraw();
+      }
+    });
+
+    canvas.addEventListener('mouseup', e => {
+      if (linkingFrom) {
+        const mouse = getMouse(e);
+
+        // Try to connect to a note header link dot
+        let connected = false;
+        for (let i = notes.length-1; i >= 0; i--) {
+          const note = notes[i];
+          const w = (note.width ?? BASE_NOTE_WIDTH) * noteScale;
+          const headerH = NOTE_HEADER_HEIGHT * noteScale;
+          if (
+            inCircle(mouse, note.x+18*noteScale, note.y+headerH/2, 12*noteScale)
+            && !(linkingFrom.type === 'note' && linkingFrom.id === note.id)
+          ) {
+            // Remove yarn if exists in either direction, else add
+            const idx = yarns.findIndex(y =>
+              (y.fromType === linkingFrom.type && y.from === linkingFrom.id && y.toType === 'note' && y.to === note.id) ||
+              (y.fromType === 'note' && y.from === note.id && y.toType === linkingFrom.type && y.to === linkingFrom.id)
+            );
+            if (idx !== -1) {
+              yarns.splice(idx, 1);
+            } else {
+              yarns.push({fromType: linkingFrom.type, from: linkingFrom.id, toType: 'note', to: note.id});
+            }
+            connected = true;
+            break;
+          }
+        }
+        // Try to connect to a polaroid link dot
+        if (!connected) {
+          for (let i = polaroids.length-1; i >= 0; i--) {
+            const pol = polaroids[i];
+            const w = BASE_POLAROID_WIDTH * noteScale, h = BASE_POLAROID_HEIGHT * noteScale;
+            if (
+              inCircle(mouse, pol.x+14*noteScale, pol.y+14*noteScale, 12*noteScale)
+              && !(linkingFrom.type === 'polaroid' && linkingFrom.id === pol.id)
+            ) {
+              // Remove yarn if exists in either direction, else add
+              const idx = yarns.findIndex(y =>
+                (y.fromType === linkingFrom.type && y.from === linkingFrom.id && y.toType === 'polaroid' && y.to === pol.id) ||
+                (y.fromType === 'polaroid' && y.from === pol.id && y.toType === linkingFrom.type && y.to === linkingFrom.id)
+              );
+              if (idx !== -1) {
+                yarns.splice(idx, 1);
+              } else {
+                yarns.push({fromType: linkingFrom.type, from: linkingFrom.id, toType: 'polaroid', to: pol.id});
+              }
+              connected = true;
+              break;
+            }
+          }
+        }
+        linkingFrom = null;
+        linkingFromPos = null;
+        linkingToPos = null;
+        canvas.style.cursor = "";
+        // persist yarns via merge endpoint
+        (async () => {
+          try {
+            await fetch(API_BASE, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ yarns }) });
+          } catch (e) {
+            save();
+          }
+        })();
+        requestDraw();
+        return;
+      }
+
+      // On mouse up: persist modified notes individually
+      if (modifiedNoteIds.size > 0) {
+        const ids = Array.from(modifiedNoteIds);
+        modifiedNoteIds.clear();
+        (async () => {
+          try {
+            for (const id of ids) {
+              const note = notes.find(n => n.id === id);
+              if (!note) continue;
+              // send only changed fields (x,y,width,height,text,colorIdx when relevant)
+              const payload = { x: note.x, y: note.y };
+              if (note.width != null) payload.width = note.width;
+              if (note.height != null) payload.height = note.height;
+              if (note.text != null) payload.text = note.text;
+              if (note.colorIdx != null) payload.colorIdx = note.colorIdx;
+              await fetch('/api/notes/' + encodeURIComponent(id), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            }
+          } catch (e) {
+            // fallback to full save if any per-note update fails
+            save();
+          }
+        })();
+      }
+
+      resizingNote = null;
+      resizeStart = null;
+      draggingNote = null;
+      draggingPolaroid = null;
+      panning = false;
+      requestDraw();
+    });
+
+    canvas.addEventListener('dblclick', e => {
+      const mouse = getMouse(e);
+      const note = hitTest(mouse.x, mouse.y);
+      if (note) {
+        editingNote = note;
+        editingInput = note.text;
+        editingCaretPos = editingInput.length;
+        canvas.focus();
+        requestDraw();
+        return;
+      }
+    });
+
+    document.getElementById('addNoteBtn').onclick = async () => {
+      const x = -viewOffset.x + 40 + Math.random()*80;
+      const y = -viewOffset.y + 40 + Math.random()*80;
+      const colorIdx = Math.floor(Math.random()*NOTE_COLORS.length);
+      const note = { x, y, text: 'New Note', colorIdx, width: BASE_NOTE_WIDTH, height: BASE_NOTE_HEIGHT };
+      try {
+        const res = await fetch('/api/notes', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(note)
+        });
+        if (res.ok) {
+          const created = await res.json();
+          notes.push(created);
+          requestDraw();
+          return;
+        }
+      } catch (e) {
+        console.warn('Failed to create note on server, falling back to local add', e);
+      }
+      note.id = Date.now() + Math.random();
+      notes.push(note);
+      save();
+    };
+
+    // --- IMAGE UPLOAD ---
+    const uploadBtn = document.getElementById('uploadBtn');
+    uploadBtn.onclick = () => {
+      const url = prompt("Paste an image URL (e.g. from Imgur):");
+      if (!url) return;
+      const x = -viewOffset.x + 60 + Math.random()*100;
+      const y = -viewOffset.y + 60 + Math.random()*100;
+      const id = Date.now() + Math.random();
+      polaroids.push({id, x, y, img: url});
+      save();
+    };
+
+    // --- Keyboard input for editing ---
+    canvas.setAttribute('tabindex', 0); // Make canvas focusable
+    canvas.addEventListener('keydown', function(e) {
+      if (!editingNote) return;
+
+      if (e.key === "Enter") {
+        // Finish editing
+        editingNote.text = editingInput;
+        // Auto-resize note to fit text
+        const minSize = getTextFitSize(editingNote.text, noteScale);
+        editingNote.width = Math.max(editingNote.width ?? BASE_NOTE_WIDTH, minSize.width);
+        editingNote.height = Math.max(editingNote.height ?? BASE_NOTE_HEIGHT, minSize.height);
+        editingNote.minWidth = minSize.width;
+        editingNote.minHeight = minSize.height;
+        const noteToSave = editingNote;
+        editingNote = null;
+        editingInput = "";
+        editingCaretPos = null;
+        // Persist the text and size for this note
+        (async () => {
+          try {
+            await fetch('/api/notes/' + encodeURIComponent(noteToSave.id), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: noteToSave.text, width: noteToSave.width, height: noteToSave.height }) });
+          } catch (e) {
+            save();
+          }
+        })();
+        requestDraw();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Escape") {
+        editingNote = null;
+        editingInput = "";
+        editingCaretPos = null;
+        requestDraw();
+        return;
+      }
+      if (e.key === "Backspace") {
+        if (editingCaretPos > 0) {
+          editingInput = editingInput.slice(0, editingCaretPos-1) + editingInput.slice(editingCaretPos);
+          editingCaretPos--;
+          requestDraw();
+        }
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "Delete") {
+        if (editingCaretPos < editingInput.length) {
+          editingInput = editingInput.slice(0, editingCaretPos) + editingInput.slice(editingCaretPos+1);
+          requestDraw();
+        }
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        if (editingCaretPos > 0) editingCaretPos--;
+        requestDraw();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        if (editingCaretPos < editingInput.length) editingCaretPos++;
+        requestDraw();
+        e.preventDefault();
+        return;
+      }
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        editingInput = editingInput.slice(0, editingCaretPos) + e.key + editingInput.slice(editingCaretPos);
+        editingCaretPos++;
+        requestDraw();
+        e.preventDefault();
+        return;
+      }
+    });
+
+    // --- Hide editor on click elsewhere ---
+    function hideEditor() {
+      if (editingNote) {
+        editingNote.text = editingInput;
+        // Auto-resize note to fit text
+        const minSize = getTextFitSize(editingNote.text, noteScale);
+        editingNote.width = Math.max(editingNote.width ?? BASE_NOTE_WIDTH, minSize.width);
+        editingNote.height = Math.max(editingNote.height ?? BASE_NOTE_HEIGHT, minSize.height);
+        editingNote.minWidth = minSize.width;
+        editingNote.minHeight = minSize.height;
+        const noteToSave = editingNote;
+        editingNote = null;
+        editingInput = "";
+        editingCaretPos = null;
+        (async () => {
+          try {
+            await fetch('/api/notes/' + encodeURIComponent(noteToSave.id), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: noteToSave.text, width: noteToSave.width, height: noteToSave.height }) });
+          } catch (e) {
+            save();
+          }
+        })();
+        requestDraw();
+      }
+    }
+
+    // --- Calculate minimum note size to fit text ---
+    function getTextFitSize(text, scale) {
+      // Use a temporary canvas context for measurement
+      const ctx2 = ctx;
+      ctx2.save();
+      ctx2.font = `${15*scale}px sans-serif`;
+      const lines = [];
+      let line = '';
+      const words = text.split(' ');
+      const maxWidth = 1000; // arbitrarily large for measuring
+      for (let n = 0; n < words.length; n++) {
+        const testLine = line + words[n] + ' ';
+        const metrics = ctx2.measureText(testLine);
+        if (metrics.width > (BASE_NOTE_WIDTH-24)*scale && n > 0) {
+          lines.push(line);
+          line = words[n] + ' ';
+        } else {
+          line = testLine;
+        }
+      }
+      lines.push(line);
+      ctx2.restore();
+      // Calculate width and height needed
+      let maxLineWidth = 0;
+      for (const l of lines) {
+        const w = ctx2.measureText(l).width;
+        if (w > maxLineWidth) maxLineWidth = w;
+      }
+      // Add padding and header
+      const width = Math.ceil((maxLineWidth + 24*scale) / scale);
+      const height = Math.ceil((NOTE_HEADER_HEIGHT*scale + lines.length * 18*scale + 18*scale) / scale);
+      return {
+        width: Math.max(NOTE_MIN_WIDTH, width),
+        height: Math.max(NOTE_HEADER_HEIGHT + 20, height)
+      };
+    }
+
+    // --- Prevent resizing note smaller than text ---
+    canvas.addEventListener('mousemove', e => {
+      if (editingNote) return;
+      const mouse = getMouse(e);
+
+      // --- Note resizing logic ---
+      if (resizingNote && resizeStart) {
+        let minW = resizingNote.minWidth || NOTE_MIN_WIDTH;
+        let minH = resizingNote.minHeight || NOTE_HEADER_HEIGHT + 20;
+        let newW = (resizeStart.origW * noteScale + (mouse.x - resizeStart.mouseX)) / noteScale;
+        let newH = (resizeStart.origH * noteScale + (mouse.y - resizeStart.mouseY)) / noteScale;
+        newW = Math.max(minW, Math.round(newW));
+        newH = Math.max(minH, Math.round(newH));
+        resizingNote.width = newW;
+        resizingNote.height = newH;
+        save();
+        requestDraw();
+        return;
+      }
+
+      requestDraw();
+    });
+
+    // --- Optimize draw loop for responsiveness ---
+    let drawQueued = false;
+    function requestDraw() {
+      if (!drawQueued) {
+        drawQueued = true;
+        window.requestAnimationFrame(() => {
+          drawQueued = false;
+          draw();
+        });
+      }
+    }
+
+    // Replace all draw() calls with requestDraw()
+
+    // Also replace draw() with requestDraw() in other event handlers:
+    canvas.addEventListener('mousemove', e => {
+      // ...existing code...
+      requestDraw();
+    });
+    canvas.addEventListener('mouseup', e => {
+      // ...existing code...
+      requestDraw();
+    });
+    canvas.addEventListener('mousedown', e => {
+      // ...existing code...
+      requestDraw();
+    });
+
+    // --- Mouse wheel zoom ---
+    // Change zoomFactor from 1.03 to 1.12 for faster zooming
+    let zoomTarget = 1;
+    let zoomAnimFrame = null;
+    let zoomCenter = null;
+
+    canvas.addEventListener('wheel', function(e) {
+      if (e.ctrlKey) return;
+      e.preventDefault();
+
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = (e.clientX - rect.left);
+      const mouseY = (e.clientY - rect.top);
+
+      // World coordinates under mouse before zoom
+      const wx = (mouseX / zoom) - viewOffset.x;
+      const wy = (mouseY / zoom) - viewOffset.y;
+
+      // Faster zoom factor
+      const zoomFactor = 1.12;
+      let newZoom = zoom * (e.deltaY < 0 ? zoomFactor : 1 / zoomFactor);
+      newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom));
+
+      zoomTarget = newZoom;
+      zoomCenter = { mouseX, mouseY, wx, wy };
+
+      if (!zoomAnimFrame) animateZoom();
+    }, { passive: false });
+
+    function animateZoom() {
+      if (Math.abs(zoom - zoomTarget) < 0.001) {
+        zoom = zoomTarget;
+        zoomAnimFrame = null;
+        zoomCenter = null;
+        save();
+        requestDraw();
+        return;
+      }
+      // Smoothly interpolate zoom
+      zoom += (zoomTarget - zoom) * 0.25;
+
+      // Keep the zoom centered on the original mouse position
+      if (zoomCenter) {
+        viewOffset.x = (zoomCenter.mouseX / zoom) - zoomCenter.wx;
+        viewOffset.y = (zoomCenter.mouseY / zoom) - zoomCenter.wy;
+      }
+
+      requestDraw();
+      zoomAnimFrame = requestAnimationFrame(animateZoom);
+    }
+
+    // --- Update getMouse to account for zoom ---
+    function getMouse(e) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (e.clientX - rect.left) / zoom - viewOffset.x,
+        y: (e.clientY - rect.top) / zoom - viewOffset.y
+      };
+    }
+
+    // --- HELPERS ---
+    function getMouse(e) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (e.clientX - rect.left) / zoom - viewOffset.x,
+        y: (e.clientY - rect.top) / zoom - viewOffset.y
+      };
+    }
+    function hitTest(x, y) {
+      for (let i = notes.length-1; i >= 0; i--) {
+        const n = notes[i];
+        const w = (n.width ?? BASE_NOTE_WIDTH) * noteScale, h = (n.height ?? BASE_NOTE_HEIGHT) * noteScale;
+        if (x >= n.x && x <= n.x+w && y >= n.y && y <= n.y+h)
+          return n;
+      }
+      return null;
+    }
+    function hitTestPolaroid(x, y) {
+      for (let i = polaroids.length-1; i >= 0; i--) {
+        const p = polaroids[i];
+        const w = BASE_POLAROID_WIDTH * noteScale, h = BASE_POLAROID_HEIGHT * noteScale;
+        if (x >= p.x && x <= p.x+w && y >= p.y && y <= p.y+h)
+          return p;
+      }
+      return null;
+    }
+    function inCircle(pt, cx, cy, r) {
+      return (pt.x-cx)**2 + (pt.y-cy)**2 < r**2;
+    }
+    function getAnchor(type, id) {
+      if (type === 'note') {
+        const n = notes.find(n => n.id === id);
+        if (!n) return null;
+        const w = (n.width ?? BASE_NOTE_WIDTH) * noteScale, h = (n.height ?? BASE_NOTE_HEIGHT) * noteScale;
+        return {x: n.x + w/2, y: n.y + NOTE_HEADER_HEIGHT*noteScale/2};
+      } else if (type === 'polaroid') {
+        const p = polaroids.find(p => p.id === id);
+        if (!p) return null;
+        const w = BASE_POLAROID_WIDTH * noteScale, h = BASE_POLAROID_HEIGHT * noteScale;
+        return {x: p.x + w/2, y: p.y + h/2};
+      }
+      return null;
+    }
+
+    // --- INIT ---
+    window.addEventListener('DOMContentLoaded', () => {
+      load();
+      resizeCanvas();
+      draw();
+    });
+
+    // --- Realtime (Socket.IO) ---
+    // load client library from server-provided socket.io path
+    const socketScript = document.createElement('script');
+    socketScript.src = '/socket.io/socket.io.js';
+    socketScript.onload = () => {
+      try {
+        const socket = io();
+        socket.on('note:created', note => {
+          // avoid duplicate if we already have this id
+          if (!notes.find(n => String(n.id) === String(note.id))) {
+            notes.push(note);
+            requestDraw();
+          }
+        });
+        socket.on('note:updated', note => {
+          const idx = notes.findIndex(n => String(n.id) === String(note.id));
+          if (idx !== -1) {
+            notes[idx] = Object.assign({}, notes[idx], note);
+            requestDraw();
+          }
+        });
+        socket.on('note:deleted', payload => {
+          notes = notes.filter(n => String(n.id) !== String(payload.id));
+          yarns = yarns.filter(y => !(y.fromType === 'note' && String(y.from) === String(payload.id)) && !(y.toType === 'note' && String(y.to) === String(payload.id)));
+          requestDraw();
+        });
+        socket.on('yarns:updated', newYarns => {
+          yarns = newYarns || [];
+          requestDraw();
+        });
+        socket.on('state:merged', incoming => {
+          // Merge any top-level keys pushed by server
+          if (incoming.notes) {
+            // naive merge: replace notes array
+            notes = incoming.notes;
+          }
+          if (incoming.yarns) yarns = incoming.yarns;
+          if (incoming.polaroids) polaroids = incoming.polaroids;
+          if (incoming.viewOffset) viewOffset = incoming.viewOffset;
+          if (incoming.noteScale) noteScale = incoming.noteScale;
+          if (incoming.zoom) zoom = incoming.zoom;
+          requestDraw();
+        });
+      } catch (e) {
+        console.warn('Socket.IO client init failed', e);
+      }
+    };
+    document.body.appendChild(socketScript);
+  </script>
+</body>
+</html>

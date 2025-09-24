@@ -4,8 +4,7 @@
   "description": "A canvas application that simulates a sticky note and corkboard with local storage support.",
   "main": "src/index.js",
   "scripts": {
-    "start": "node server/index.js",
-    "build": "webpack --mode production"
+    "start": "node server/index.js"
   },
   "keywords": [
     "sticky notes",

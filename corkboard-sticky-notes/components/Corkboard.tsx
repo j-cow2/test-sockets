@@ -219,6 +219,23 @@ const Corkboard: React.FC<CorkboardProps> = ({ board, onUpdate, onDelete }) => {
     }
   };
 
+  const handleExportBoard = () => {
+    const data = socketService.getSharedData();
+    // Use the current board metadata for the export
+    const fullBoard = {
+      ...data,
+      id: board.id,
+      createdAt: board.createdAt
+    };
+    const blob = new Blob([JSON.stringify(fullBoard, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${board.name.replace(/\s+/g, '_')}_corkboard.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleItemClick = (itemId: string, event: React.MouseEvent) => {
     const wasDragged = (event.currentTarget.closest('[data-was-dragged]') as HTMLElement)?.dataset.wasDragged === 'true';
     if (wasDragged || !isConnectionActive) return;
@@ -334,6 +351,13 @@ const Corkboard: React.FC<CorkboardProps> = ({ board, onUpdate, onDelete }) => {
             🧶 String
           </button>
           <div className="w-4"></div>
+          <button 
+            onClick={handleExportBoard}
+            className="tool-btn bg-stone-200 text-stone-800 border-stone-400 hover:bg-white"
+            title="Download Board Data"
+          >
+            💾 Save
+          </button>
           <button onClick={onDelete} className="p-3 text-stone-600 hover:text-red-500 transition-colors rounded-xl hover:bg-white/5">🗑️</button>
         </div>
       </div>

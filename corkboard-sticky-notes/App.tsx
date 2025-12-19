@@ -8,9 +8,11 @@ import Corkboard from './components/Corkboard';
 const HomePage: React.FC<{ 
   state: AppState; 
   onCreate: (name: string, password?: string) => string;
-}> = ({ state, onCreate }) => {
+  onImport: (board: Board) => void;
+}> = ({ state, onCreate, onImport }) => {
   const [newBoardName, setNewBoardName] = useState('');
   const [showCreate, setShowCreate] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
   const onSubmit = (e: React.FormEvent) => {
@@ -20,6 +22,40 @@ const HomePage: React.FC<{
     setNewBoardName('');
     setShowCreate(false);
     navigate(`/board/${newId}`);
+  };
+
+  const handleImportClick = () => {
+    importInputRef.current?.click();
+  };
+
+  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const boardData = JSON.parse(event.target?.result as string);
+        // Basic validation
+        if (boardData && boardData.items && boardData.connections) {
+          // Generate a fresh ID if it conflicts or just to be safe for local storage uniqueness
+          const importedBoard: Board = {
+            ...boardData,
+            id: boardData.id || Math.random().toString(36).substring(2, 9),
+            lastModified: Date.now()
+          };
+          onImport(importedBoard);
+          navigate(`/board/${importedBoard.id}`);
+        } else {
+          alert("Invalid board file format.");
+        }
+      } catch (err) {
+        console.error("Failed to parse board file:", err);
+        alert("Failed to import board. Ensure the file is a valid .json exported from CorkCork.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ''; // Reset for next time
   };
 
   const boards = (Object.values(state.boards) as Board[]).sort((a, b) => b.createdAt - a.createdAt);
@@ -36,13 +72,29 @@ const HomePage: React.FC<{
         <div className="space-y-6">
           <div className="flex justify-between items-center pb-2">
             <h2 className="text-xs font-black text-stone-400 uppercase tracking-[0.2em]">Active Rooms</h2>
-            <button 
-              onClick={() => setShowCreate(!showCreate)}
-              className="bg-stone-900 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-black transition-all active:scale-95"
-            >
-              {showCreate ? 'Close' : '+ New Room'}
-            </button>
+            <div className="flex gap-2">
+              <button 
+                onClick={handleImportClick}
+                className="bg-stone-200 text-stone-800 px-4 py-2 rounded-xl text-sm font-bold hover:bg-stone-300 transition-all active:scale-95"
+              >
+                Import
+              </button>
+              <button 
+                onClick={() => setShowCreate(!showCreate)}
+                className="bg-stone-900 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-black transition-all active:scale-95"
+              >
+                {showCreate ? 'Close' : '+ New Room'}
+              </button>
+            </div>
           </div>
+
+          <input 
+            type="file" 
+            ref={importInputRef} 
+            className="hidden" 
+            accept=".json" 
+            onChange={onFileChange} 
+          />
 
           {showCreate && (
             <form onSubmit={onSubmit} className="bg-stone-100 p-6 rounded-2xl space-y-4 animate-in fade-in slide-in-from-top-2 duration-300 border border-stone-200">
@@ -147,6 +199,14 @@ const App: React.FC = () => {
     return board.id;
   };
 
+  const handleImportBoard = (board: Board) => {
+    setAppState(prev => {
+      const newState = { ...prev, boards: { ...prev.boards, [board.id]: board } };
+      saveAppState(newState);
+      return newState;
+    });
+  };
+
   const handleUpdateBoard = (board: Board) => {
     setAppState(prev => {
       const newState = { ...prev, boards: { ...prev.boards, [board.id]: board } };
@@ -168,7 +228,7 @@ const App: React.FC = () => {
   return (
     <HashRouter>
       <Routes>
-        <Route path="/" element={<HomePage state={appState} onCreate={handleCreateBoard} />} />
+        <Route path="/" element={<HomePage state={appState} onCreate={handleCreateBoard} onImport={handleImportBoard} />} />
         <Route path="/board/:id" element={<BoardWrapper state={appState} onUpdate={handleUpdateBoard} onDelete={handleDeleteBoard} />} />
       </Routes>
     </HashRouter>

@@ -1,0 +1,8 @@
+
+{
+  "name": "CorkCork",
+  "description": "A high-fidelity virtual conspiracy corkboard for organizing ideas with sticky notes, polaroids, and droopy red yarn connections.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
